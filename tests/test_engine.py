@@ -105,12 +105,14 @@ class _RecordedThread:
 
 
 class EngineHorizontalScrollTests(unittest.TestCase):
-    def _make_engine(self, hscroll_threshold=1):
+    def _make_engine(self, hscroll_threshold=1, hscroll_volume_multiplier=None):
         from core.engine import Engine
 
         cfg = copy.deepcopy(DEFAULT_CONFIG)
         if hscroll_threshold is not None:
             cfg["settings"]["hscroll_threshold"] = hscroll_threshold
+        if hscroll_volume_multiplier is not None:
+            cfg["settings"]["hscroll_volume_multiplier"] = hscroll_volume_multiplier
 
         with (
             patch("core.engine.MouseHook", _FakeMouseHook),
@@ -177,6 +179,82 @@ class EngineHorizontalScrollTests(unittest.TestCase):
             ))
 
         self.assertEqual(execute_action_mock.call_count, 1)
+
+    def test_hscroll_volume_action_uses_default_multiplier(self):
+        engine = self._make_engine()
+        handler = engine._make_hscroll_handler("volume_up")
+
+        with patch("core.engine.execute_action") as execute_action_mock:
+            handler(SimpleNamespace(
+                event_type=MouseEvent.HSCROLL_RIGHT,
+                raw_data=1,
+                timestamp=1.00,
+            ))
+
+        self.assertEqual(execute_action_mock.call_count, 5)
+        self.assertEqual(
+            execute_action_mock.call_args_list,
+            [unittest.mock.call("volume_up")] * 5,
+        )
+
+    def test_hscroll_volume_action_uses_custom_multiplier(self):
+        engine = self._make_engine(hscroll_volume_multiplier=3)
+        handler = engine._make_hscroll_handler("volume_down")
+
+        with patch("core.engine.execute_action") as execute_action_mock:
+            handler(SimpleNamespace(
+                event_type=MouseEvent.HSCROLL_LEFT,
+                raw_data=1,
+                timestamp=1.00,
+            ))
+
+        self.assertEqual(execute_action_mock.call_count, 3)
+        self.assertEqual(
+            execute_action_mock.call_args_list,
+            [unittest.mock.call("volume_down")] * 3,
+        )
+
+    def test_hscroll_non_volume_action_ignores_multiplier(self):
+        engine = self._make_engine(hscroll_volume_multiplier=5)
+        handler = engine._make_hscroll_handler("browser_back")
+
+        with patch("core.engine.execute_action") as execute_action_mock:
+            handler(SimpleNamespace(
+                event_type=MouseEvent.HSCROLL_LEFT,
+                raw_data=1,
+                timestamp=1.00,
+            ))
+
+        self.assertEqual(execute_action_mock.call_count, 1)
+        self.assertEqual(
+            execute_action_mock.call_args_list,
+            [unittest.mock.call("browser_back")],
+        )
+
+    def test_hscroll_volume_action_fast_cooldown(self):
+        engine = self._make_engine(hscroll_volume_multiplier=1)
+        handler = engine._make_hscroll_handler("volume_up")
+
+        with patch("core.engine.execute_action") as execute_action_mock:
+            handler(SimpleNamespace(
+                event_type=MouseEvent.HSCROLL_RIGHT,
+                raw_data=1,
+                timestamp=1.00,
+            ))
+            # 10ms later -> inside 20ms cooldown, rejected
+            handler(SimpleNamespace(
+                event_type=MouseEvent.HSCROLL_RIGHT,
+                raw_data=1,
+                timestamp=1.01,
+            ))
+            # 30ms later -> exceeds 20ms cooldown, fires
+            handler(SimpleNamespace(
+                event_type=MouseEvent.HSCROLL_RIGHT,
+                raw_data=1,
+                timestamp=1.03,
+            ))
+
+        self.assertEqual(execute_action_mock.call_count, 2)
 
     def test_connection_callback_receives_current_state_immediately(self):
         engine = self._make_engine()

@@ -1623,5 +1623,36 @@ class BackendListPropertyMemoizationTests(unittest.TestCase):
         self.assertIs(backend.knownApps, first)
 
 
+@unittest.skipIf(Backend is None, "PySide6 not installed in test environment")
+class BackendScrollSettingsTests(unittest.TestCase):
+    def _build(self, cfg=None):
+        loaded = copy.deepcopy(cfg or DEFAULT_CONFIG)
+        with (
+            patch("ui.backend.load_config", return_value=loaded),
+            patch("ui.backend.save_config") as self.save_config_mock,
+            patch("ui.backend.supports_login_startup", return_value=False),
+        ):
+            return Backend(engine=None)
+
+    def test_hscroll_volume_multiplier_defaults_to_config_value(self):
+        backend = self._build()
+        self.assertEqual(backend.hscrollVolumeMultiplier, 5)
+
+    def test_set_hscroll_volume_multiplier_updates_config_and_saves(self):
+        backend = self._build()
+        backend.setHScrollVolumeMultiplier(8)
+        self.assertEqual(backend.hscrollVolumeMultiplier, 8)
+        self.assertEqual(backend._cfg["settings"]["hscroll_volume_multiplier"], 8)
+        self.save_config_mock.assert_called()
+
+    def test_set_hscroll_volume_multiplier_clamps_range(self):
+        backend = self._build()
+        backend.setHScrollVolumeMultiplier(0)
+        self.assertEqual(backend.hscrollVolumeMultiplier, 1)
+
+        backend.setHScrollVolumeMultiplier(99)
+        self.assertEqual(backend.hscrollVolumeMultiplier, 20)
+
+
 if __name__ == "__main__":
     unittest.main()

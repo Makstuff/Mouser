@@ -1338,6 +1338,120 @@ Item {
 
             Item { width: 1; height: 16 }
 
+            // ── Thumb Wheel Volume Speed ──────────────────────────
+            Rectangle {
+                width: parent.width - 72
+                anchors.horizontalCenter: parent.horizontalCenter
+                height: thumbWheelVolContent.implicitHeight + 40
+                radius: Theme.radius
+                color: scrollPage.theme.bgCard
+                border.width: 1
+                border.color: scrollPage.theme.border
+
+                Column {
+                    id: thumbWheelVolContent
+                    anchors {
+                        left: parent.left
+                        right: parent.right
+                        top: parent.top
+                        margins: 20
+                    }
+                    spacing: 12
+
+                    Text {
+                        text: s["scroll.thumbwheel_volume_title"]
+                        font {
+                            family: uiState.fontFamily
+                            pixelSize: 16
+                            bold: true
+                        }
+                        color: scrollPage.theme.textPrimary
+                    }
+
+                    Text {
+                        text: s["scroll.thumbwheel_volume_desc"]
+                        font {
+                            family: uiState.fontFamily
+                            pixelSize: 12
+                        }
+                        color: scrollPage.theme.textSecondary
+                    }
+
+                    Rectangle {
+                        width: parent.width
+                        height: 60
+                        radius: 10
+                        color: scrollPage.theme.bgSubtle
+
+                        RowLayout {
+                            anchors {
+                                fill: parent
+                                leftMargin: 16
+                                rightMargin: 16
+                            }
+                            spacing: 10
+
+                            Text {
+                                text: "1x"
+                                font { family: uiState.fontFamily; pixelSize: 11 }
+                                color: scrollPage.theme.textDim
+                            }
+
+                            WheelSafeSlider {
+                                id: hscrollVolumeSlider
+                                Layout.fillWidth: true
+                                from: 1
+                                to: 10
+                                stepSize: 1
+                                value: backend.hscrollVolumeMultiplier
+                                accentColor: scrollPage.theme.accent
+                                accentDimColor: scrollPage.theme.accentDim
+                                trackColor: scrollPage.theme.border
+
+                                onMoved: {
+                                    hscrollVolumeLabel.text = Math.round(value) + "x"
+                                    hscrollVolumeDebounce.restart()
+                                }
+                            }
+
+                            Text {
+                                text: "10x"
+                                font { family: uiState.fontFamily; pixelSize: 11 }
+                                color: scrollPage.theme.textDim
+                            }
+
+                            Rectangle {
+                                Layout.preferredWidth: 54
+                                Layout.preferredHeight: 32
+                                radius: 8
+                                color: scrollPage.theme.accentDim
+
+                                Text {
+                                    id: hscrollVolumeLabel
+                                    anchors.centerIn: parent
+                                    text: backend.hscrollVolumeMultiplier + "x"
+                                    font {
+                                        family: uiState.fontFamily
+                                        pixelSize: 13
+                                        bold: true
+                                    }
+                                    color: scrollPage.theme.accent
+                                }
+                            }
+                        }
+
+                        Timer {
+                            id: hscrollVolumeDebounce
+                            interval: 200
+                            repeat: false
+                            onTriggered: backend.setHScrollVolumeMultiplier(hscrollVolumeSlider.value)
+                        }
+                    }
+                }
+            }
+
+            Item { width: 1; height: 16 }
+
             // ── DPI note ──────────────────────────────────────────
             Rectangle {
                 width: parent.width - 72
@@ -1402,6 +1516,10 @@ Item {
             vscrollSwitch.checked = backend.invertVScroll
             hscrollSwitch.checked = backend.invertHScroll
             ignoreTrackpadSwitch.checked = backend.ignoreTrackpad
+            if (!hscrollVolumeSlider.pressed) {
+                hscrollVolumeSlider.value = backend.hscrollVolumeMultiplier
+                hscrollVolumeLabel.text = backend.hscrollVolumeMultiplier + "x"
+            }
         }
         function onSmartShiftChanged() {
             if (!scrollForceSlider.pressed) {

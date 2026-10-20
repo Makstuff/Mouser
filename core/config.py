@@ -267,6 +267,7 @@ DEFAULT_CONFIG = {
         "start_minimized": True,
         "start_at_login": False,
         "hscroll_threshold": 0.1,
+        "hscroll_volume_multiplier": 5,
         "invert_hscroll": False,  # swap horizontal scroll directions
         "invert_vscroll": False,  # swap vertical scroll directions
         "dpi": 1000,              # pointer speed / DPI setting
@@ -737,6 +738,7 @@ def _migrate(cfg):
     cfg["settings"].setdefault("language", "en")
     cfg["settings"].setdefault("ignore_trackpad", True)
     cfg["settings"].setdefault("scroll_force", 50)
+    cfg["settings"].setdefault("hscroll_volume_multiplier", 5)
     cfg["settings"].setdefault("screenshot_directory", "")
     cfg["settings"].setdefault("check_for_updates", True)
     cfg["settings"].setdefault("update_check_state", {})

@@ -31,7 +31,7 @@ from core.logi_devices import clamp_dpi
 from core.actions_ring import ActionsRingController
 
 HSCROLL_ACTION_COOLDOWN_S = 0.35
-HSCROLL_VOLUME_COOLDOWN_S = 0.06
+HSCROLL_VOLUME_COOLDOWN_S = 0.02
 _VOLUME_ACTIONS = {"volume_up", "volume_down"}
 BACKGROUND_BATTERY_POLL_INTERVAL_S = 1800
 BACKGROUND_SMART_SHIFT_POLL_INTERVAL_S = 300
@@ -910,9 +910,11 @@ class Engine:
             threshold = self._hscroll_threshold()
             now = getattr(event, "timestamp", None) or time.time()
 
-            cooldown = HSCROLL_VOLUME_COOLDOWN_S if action_id in _VOLUME_ACTIONS else HSCROLL_ACTION_COOLDOWN_S
+            is_volume = action_id in _VOLUME_ACTIONS
+            cooldown = HSCROLL_VOLUME_COOLDOWN_S if is_volume else HSCROLL_ACTION_COOLDOWN_S
             if now - state["last_fire_at"] < cooldown:
-                state["accum"] = 0.0
+                if not is_volume:
+                    state["accum"] = 0.0
                 return
 
             state["accum"] += step
@@ -921,12 +923,24 @@ class Engine:
 
             state["accum"] = 0.0
             state["last_fire_at"] = now
+            multiplier = self._hscroll_volume_multiplier() if is_volume else 1
             self._emit_debug(
                 f"Mapped {event.event_type} -> {action_id} "
                 f"({self._action_label(action_id)})"
+                + (f" x{multiplier}" if multiplier > 1 else "")
             )
-            execute_action(action_id)
+            for i in range(multiplier):
+                if i > 0:
+                    time.sleep(0.001)
+                execute_action(action_id)
         return handler
+
+    def _hscroll_volume_multiplier(self):
+        try:
+            val = int(self.cfg.get("settings", {}).get("hscroll_volume_multiplier", 5))
+            return max(1, min(20, val))
+        except (TypeError, ValueError):
+            return 5
 
     def _hscroll_step(self, raw_value):
         if not isinstance(raw_value, (int, float)):
