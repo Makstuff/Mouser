@@ -896,6 +896,7 @@ FEAT_DEVICE_NAME    = 0x0005      # Device Name & Type
 FEAT_BATTERY_STATUS = 0x1000      # Battery Status (fallback)
 FEAT_HAPTIC         = 0x19B0      # Haptic Feedback (MX Master 4)
 FEAT_FORCE_SENSING  = 0x19C0      # Force Sensing Button (MX Master 4)
+FEAT_WIRELESS_DEVICE_STATUS = 0x1D4B  # Wireless Device Status (wake/link events)
 DEFAULT_GESTURE_CID = DEFAULT_GESTURE_CIDS[0]
 
 # REPROG_V4 ``setCidReporting`` control flags (fn 3 byte 2). The
@@ -1098,6 +1099,9 @@ class HidGestureListener:
         # CID so it stays usable on the fallback path without freezing
         # the cursor.
         self._button_only_cids: set[int] = set()
+        self._desired_dpi = None        # persisted desired DPI for auto-recovery on wake/reconnect
+        self._last_reset_check_time = 0.0
+        self._wireless_status_idx = None  # feature index of WIRELESS_DEVICE_STATUS (0x1D4B)
         self._pending_dpi = None        # set by set_dpi(), applied in loop
         self._dpi_result  = None        # True/False after apply
         self._dpi_event   = threading.Event()
@@ -1233,6 +1237,8 @@ class HidGestureListener:
             )
         if self._battery_idx is not None and self._battery_feature_id is not None:
             feature_ids.append(self._battery_feature_id)
+        if self._wireless_status_idx is not None:
+            feature_ids.append(FEAT_WIRELESS_DEVICE_STATUS)
         feature_ids.extend(sorted(self._wheel_feature_indexes))
         return tuple(feature_ids)
 
@@ -1255,6 +1261,11 @@ class HidGestureListener:
             features.append({
                 "feature_id": self._battery_feature_id,
                 "index": self._battery_idx,
+            })
+        if self._wireless_status_idx is not None:
+            features.append({
+                "feature_id": FEAT_WIRELESS_DEVICE_STATUS,
+                "index": self._wireless_status_idx,
             })
         for feature_id, index in sorted(self._wheel_feature_indexes.items()):
             features.append({"feature_id": feature_id, "index": index})
@@ -1280,6 +1291,8 @@ class HidGestureListener:
                          if self._smart_shift_enhanced
                          else "SMART_SHIFT (0x2110)")
             features[feat_name] = f"index 0x{self._smart_shift_idx:02X}"
+        if self._wireless_status_idx is not None:
+            features["WIRELESS_DEVICE_STATUS (0x1D4B)"] = f"index 0x{self._wireless_status_idx:02X}"
         if self._battery_idx is not None:
             feat_name = (f"0x{self._battery_feature_id:04X}"
                          if self._battery_feature_id else "unknown")
@@ -1912,10 +1925,22 @@ class HidGestureListener:
 
     # ── DPI control ───────────────────────────────────────────────
 
+    @property
+    def desired_dpi(self):
+        return self._desired_dpi
+
+    def set_desired_dpi(self, dpi_value):
+        """Set the desired DPI value for auto-recovery on wake/reconnect."""
+        if dpi_value is not None:
+            self._desired_dpi = clamp_dpi(dpi_value, self._connected_device_info)
+        else:
+            self._desired_dpi = None
+
     def set_dpi(self, dpi_value):
         """Queue a DPI change -- will be applied on the listener thread.
         Can be called from any thread.  Returns True on success."""
         dpi = clamp_dpi(dpi_value, self._connected_device_info)
+        self._desired_dpi = dpi
         self._dpi_result = None
         self._dpi_event.clear()
         self._pending_dpi = dpi
@@ -1945,6 +1970,7 @@ class HidGestureListener:
             _, _, _, _, p = resp
             actual = (p[1] << 8 | p[2]) if len(p) >= 3 else dpi
             print(f"[HidGesture] DPI set to {actual}")
+            self._desired_dpi = actual
             self._dpi_result = True
         else:
             print("[HidGesture] DPI set FAILED")
@@ -2746,12 +2772,65 @@ class HidGestureListener:
                     except Exception:
                         pass
 
+    def _check_and_restore_settings_if_reset(self):
+        """Called on report arrival after silence (_no_data_count >= _STALE_HOLD_LIMIT).
+        If the mouse power-cycled or woke from deep sensor sleep, runtime registers
+        (DPI, button diversions, SmartShift) may have reverted to hardware defaults.
+        This checks if settings were reset and immediately restores them.
+        """
+        now = time.monotonic()
+        if now - getattr(self, "_last_reset_check_time", 0.0) < 3.0:
+            return
+        self._last_reset_check_time = now
+
+        if self._dev is None:
+            return
+
+        needs_reconnect = False
+
+        # 1. Check DPI if adjustable DPI feature is active and desired DPI is known
+        if self._dpi_idx is not None and self._desired_dpi is not None:
+            try:
+                resp = self._request(self._dpi_idx, 2, [0x00], timeout_ms=300)
+                if resp:
+                    _, _, _, _, p = resp
+                    current_dpi = (p[1] << 8 | p[2]) if len(p) >= 3 else None
+                    if current_dpi is not None and current_dpi != self._desired_dpi:
+                        print(
+                            f"[HidGesture] DPI reset detected (current={current_dpi}, "
+                            f"desired={self._desired_dpi}) — restoring immediately"
+                        )
+                        hi = (self._desired_dpi >> 8) & 0xFF
+                        lo = self._desired_dpi & 0xFF
+                        set_resp = self._request(self._dpi_idx, 3, [0x00, hi, lo], timeout_ms=300)
+                        if set_resp:
+                            print(f"[HidGesture] Restored DPI to {self._desired_dpi}")
+                        needs_reconnect = True
+            except Exception as exc:
+                print(f"[HidGesture] DPI reset check failed: {exc}")
+
+        # 2. Check gesture button diversion if REPROG_V4 is active
+        if not needs_reconnect and self._feat_idx is not None and self._gesture_cid:
+            try:
+                cid_resp = self._get_cid_reporting(self._gesture_cid)
+                if cid_resp:
+                    _, _, _, _, p = cid_resp
+                    reporting_flags = p[0] if p else 0
+                    if reporting_flags == 0:
+                        print("[HidGesture] Button diversion reset detected — restoring")
+                        needs_reconnect = True
+            except Exception as exc:
+                print(f"[HidGesture] Button reporting check failed: {exc}")
+
+        if needs_reconnect:
+            self.force_reconnect()
+
     def _on_report(self, raw):
         """Inspect an incoming HID++ report for diverted button / raw XY events."""
         msg = _parse(raw)
         if msg is None:
             return
-        _, feat, func, _sw, params = msg
+        r_dev, feat, func, _sw, params = msg
 
         # Unsolicited battery status broadcast (feature 0x1004 / 0x1000,
         # event func 0) — pushed to the UI so charging shows instantly.
@@ -2761,6 +2840,26 @@ class HidGestureListener:
                 and feat == self._battery_idx
                 and func == 0 and _sw != MY_SW):
             self._handle_battery_notification(params)
+            return
+
+        # Receiver connection/status notification (0x41 = Device Connection, 0x42 = Wireless Status).
+        # Emitted by Logi Bolt / Unifying receivers when paired device connects/wakes or disconnects.
+        if feat in (0x41, 0x42):
+            if r_dev == self._dev_idx or self._dev_idx == BT_DEV_IDX or not self._connected:
+                link_up = bool(params and (params[0] & 0x40)) if feat == 0x41 else True
+                print(
+                    f"[HidGesture] Receiver notification 0x{feat:02X} dev=0x{r_dev:02X} "
+                    f"link_up={link_up}"
+                )
+                if link_up:
+                    self.force_reconnect()
+            return
+
+        # Wireless Device Status event (feature 0x1D4B).
+        if (self._wireless_status_idx is not None
+                and feat == self._wireless_status_idx):
+            print(f"[HidGesture] Wireless device status event: params=[{_hex_bytes(params)}]")
+            self.force_reconnect()
             return
 
         if feat != self._feat_idx:
@@ -3200,6 +3299,10 @@ class HidGestureListener:
                                       f"(count query failed)")
                         except Exception as exc:
                             print(f"[HidGesture] FORCE_SENSING probe failed: {exc}")
+                    ws_fi = self._find_feature(FEAT_WIRELESS_DEVICE_STATUS)
+                    if ws_fi:
+                        self._wireless_status_idx = ws_fi
+                        print(f"[HidGesture] Found WIRELESS_DEVICE_STATUS @0x{ws_fi:02X}")
                     hw_fi = self._wheel_feature_indexes.get(FEAT_HIRES_WHEEL_ENHANCED)
                     if hw_fi:
                         self._hires_wheel_idx = hw_fi
@@ -3401,13 +3504,9 @@ class HidGestureListener:
                             _no_data_count = 0
                             self._consecutive_request_timeouts = 0
                             self._connected = True
-                            if self._on_connect:
-                                try:
-                                    self._on_connect()
-                                except Exception:
-                                    pass
-                            print("[HidGesture] Device woke from sleep")
+                            print("[HidGesture] Device woke from sleep — reconnecting to restore settings")
                             self._on_report(raw)
+                            self.force_reconnect()
                         continue
 
                     # Apply any queued DPI command
@@ -3428,6 +3527,8 @@ class HidGestureListener:
                         self._apply_pending_force_sensing()
                     raw = self._rx(1000)
                     if raw:
+                        if _no_data_count >= _STALE_HOLD_LIMIT:
+                            self._check_and_restore_settings_if_reset()
                         _no_data_count = 0
                         self._on_report(raw)
                     else:
@@ -3452,6 +3553,7 @@ class HidGestureListener:
             self._smart_shift_idx = None
             self._battery_idx = None
             self._battery_feature_id = None
+            self._wireless_status_idx = None
             self._wheel_feature_indexes = {}
             self._drain_pending_requests()
             self._hires_wheel_idx = None

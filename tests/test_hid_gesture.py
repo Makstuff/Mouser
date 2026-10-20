@@ -1528,5 +1528,113 @@ class HidReconnectStormTests(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 0.5)
 
 
+class TestHidDpiRecoveryAndReconnect(unittest.TestCase):
+    def test_desired_dpi_property_and_setter(self):
+        listener = hid_gesture.HidGestureListener()
+        self.assertIsNone(listener.desired_dpi)
+        listener.set_desired_dpi(2400)
+        self.assertEqual(listener.desired_dpi, 2400)
+        listener.set_desired_dpi(None)
+        self.assertIsNone(listener.desired_dpi)
+
+    def test_check_and_restore_settings_recovers_dpi_when_hardware_reverts(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev = Mock()
+        listener._dpi_idx = 0x05
+        listener._desired_dpi = 2400
+
+        def fake_request(feat, func, params, timeout_ms=2000):
+            if feat == 0x05 and func == 2:
+                # Hardware currently reports 1000 DPI (0x03E8)
+                return (0xFF, 0x05, 2, 0x0A, [0x00, 0x03, 0xE8])
+            if feat == 0x05 and func == 3:
+                # setSensorDpi acknowledged
+                return (0xFF, 0x05, 3, 0x0A, params)
+            return None
+
+        listener._request = Mock(side_effect=fake_request)
+        listener._check_and_restore_settings_if_reset()
+
+        # Verified that setSensorDpi was sent with 2400 (0x0960)
+        listener._request.assert_any_call(0x05, 3, [0x00, 0x09, 0x60], timeout_ms=300)
+        self.assertTrue(listener._reconnect_requested)
+
+    def test_check_and_restore_settings_noop_when_dpi_matches(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev = Mock()
+        listener._dpi_idx = 0x05
+        listener._desired_dpi = 2400
+
+        def fake_request(feat, func, params, timeout_ms=2000):
+            if feat == 0x05 and func == 2:
+                # Hardware reports desired 2400 DPI (0x0960)
+                return (0xFF, 0x05, 2, 0x0A, [0x00, 0x09, 0x60])
+            return None
+
+        listener._request = Mock(side_effect=fake_request)
+        listener._check_and_restore_settings_if_reset()
+
+        self.assertFalse(listener._reconnect_requested)
+        # Verify no setSensorDpi (func 3) was called
+        calls_func_3 = [
+            call for call in listener._request.call_args_list
+            if len(call.args) > 1 and call.args[1] == 3
+        ]
+        self.assertEqual(len(calls_func_3), 0)
+
+    def test_check_and_restore_settings_detects_cleared_gesture_diversion(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev = Mock()
+        listener._dpi_idx = None
+        listener._feat_idx = 0x03
+        listener._gesture_cid = 0x00C4
+        # Return reporting flags = 0 (all divert flags cleared on power-cycle)
+        listener._get_cid_reporting = Mock(return_value=(0xFF, 0x03, 2, 0x0A, [0x00]))
+
+        listener._check_and_restore_settings_if_reset()
+        self.assertTrue(listener._reconnect_requested)
+
+    def test_receiver_connection_notification_triggers_force_reconnect(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0x01
+        listener._connected = True
+
+        # Short report: report_id=0x10, dev=0x01, sub_id=0x41, link_up bit 6 set (0x40)
+        raw = [0x10, 0x01, 0x41, 0x00, 0x40, 0x00, 0x00]
+        listener._on_report(raw)
+        self.assertTrue(listener._reconnect_requested)
+
+    def test_receiver_disconnect_notification_does_not_trigger_reconnect(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0x01
+        listener._connected = True
+
+        # Short report: report_id=0x10, dev=0x01, sub_id=0x41, link_up bit 6 not set
+        raw = [0x10, 0x01, 0x41, 0x00, 0x00, 0x00, 0x00]
+        listener._on_report(raw)
+        self.assertFalse(listener._reconnect_requested)
+
+    def test_receiver_wireless_status_notification_triggers_force_reconnect(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0x01
+        listener._connected = True
+
+        # Short report: report_id=0x10, dev=0x01, sub_id=0x42
+        raw = [0x10, 0x01, 0x42, 0x00, 0x00, 0x00, 0x00]
+        listener._on_report(raw)
+        self.assertTrue(listener._reconnect_requested)
+
+    def test_wireless_device_status_notification_triggers_force_reconnect(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0xFF
+        listener._wireless_status_idx = 0x08
+        listener._connected = True
+
+        # Long report: report_id=0x11, dev=0xFF, feat=0x08 (0x1D4B), func=0
+        raw = [0x11, 0xFF, 0x08, 0x00, 0x01, 0x00, 0x00]
+        listener._on_report(raw)
+        self.assertTrue(listener._reconnect_requested)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -490,6 +490,14 @@ class BaseMouseHook:
             listener.set_thumb_rawxy_enabled(self._thumb_direction_enabled)
         return self._hid_gesture
 
+    def set_dpi(self, dpi_value):
+        if self._hid_gesture:
+            if hasattr(self._hid_gesture, "set_desired_dpi"):
+                self._hid_gesture.set_desired_dpi(dpi_value)
+            if hasattr(self._hid_gesture, "set_dpi"):
+                return self._hid_gesture.set_dpi(dpi_value)
+        return False
+
     def _stop_hid_listener(self):
         if self._hid_gesture:
             self._hid_gesture.stop()

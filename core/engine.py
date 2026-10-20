@@ -138,6 +138,8 @@ class Engine:
         try:
             if hasattr(self.hook, "set_dpi"):
                 self.hook.set_dpi(dpi)
+            else:
+                self.set_dpi(dpi)
         except Exception as e:
             print(f"[Engine] Failed to set DPI: {e}")
 
@@ -1176,8 +1178,20 @@ class Engine:
         ss_threshold = saved_ss_state["threshold"]
         ss_scroll_force = saved_ss_state["scroll_force"]
 
-        # Phase A: apply Smart Shift immediately so the physical wheel mode
-        # converges before the settled replay.
+        # Phase A: apply Smart Shift and DPI immediately so the physical wheel mode
+        # and cursor speed converge before the settled replay.
+        if saved_dpi is not None and getattr(hg, "dpi_supported", False):
+            if not hasattr(hg, "set_dpi"):
+                replay_ok = False
+            elif hg.set_dpi(saved_dpi):
+                if self._dpi_read_cb:
+                    try:
+                        self._dpi_read_cb(saved_dpi)
+                    except Exception:
+                        pass
+            else:
+                replay_ok = False
+
         if saved_ss and getattr(hg, "smart_shift_supported", False):
             if not hasattr(hg, "set_smart_shift"):
                 replay_ok = False
@@ -1334,7 +1348,7 @@ class Engine:
                 name="BatteryPoll",
             )
             self._battery_poll_thread.start()
-        if hid_features_ready and hid_features_changed:
+        if hid_features_ready and (hid_features_changed or (connected and connection_changed)):
             self._request_saved_settings_replay()
 
     def _background_hid_poll_allowed(self, now):
@@ -1472,6 +1486,8 @@ class Engine:
         # Try via the hook's HidGestureListener
         hg = self.hook._hid_gesture
         if hg:
+            if hasattr(hg, "set_desired_dpi"):
+                hg.set_desired_dpi(dpi)
             return hg.set_dpi(dpi)
         print("[Engine] No HID++ connection — DPI not applied")
         return False

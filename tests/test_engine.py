@@ -565,7 +565,8 @@ class EngineReplayPhaseOneTests(unittest.TestCase):
             read_smart_shift=Mock(return_value={"mode": "ratchet", "enabled": False, "threshold": 25}),
         )
 
-        engine._battery_poll_loop(stop_event)
+        with patch("core.engine._system_idle_seconds", return_value=0.0):
+            engine._battery_poll_loop(stop_event)
 
         engine.hook._hid_gesture.read_battery.assert_called_once_with()
         engine.hook._hid_gesture.read_smart_shift.assert_not_called()
@@ -708,6 +709,69 @@ class WheelInvertConnectThreadingTests(unittest.TestCase):
             # configured invert state.
             worker.run_target()
             request.assert_called_once_with(True, False)
+
+
+class TestEngineDpiReconnectReplay(unittest.TestCase):
+    def _make_engine(self):
+        from core.engine import Engine
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        with (
+            patch("core.engine.MouseHook", _FakeMouseHook),
+            patch("core.engine.AppDetector", _FakeAppDetector),
+            patch("core.engine.load_config", return_value=cfg),
+        ):
+            return Engine()
+
+    def test_on_connection_change_triggers_replay_on_reconnect_even_if_features_ready(self):
+        engine = self._make_engine()
+        engine._last_connection_state = False
+        engine._last_hid_features_ready = True
+        engine.hook._hid_gesture = SimpleNamespace(
+            connected_device=SimpleNamespace(name="MX Master 3S"),
+            smart_shift_supported=True,
+            dpi_supported=True,
+        )
+        engine._request_saved_settings_replay = Mock()
+
+        engine._on_connection_change(True)
+        engine._request_saved_settings_replay.assert_called_once()
+
+    def test_run_saved_settings_replay_phase_a_applies_dpi_immediately(self):
+        engine = self._make_engine()
+        engine.cfg = {"settings": {"dpi": 2400}}
+        hg = SimpleNamespace(
+            connected_device=SimpleNamespace(name="MX Master 3S"),
+            dpi_supported=True,
+            smart_shift_supported=False,
+            haptic_supported=False,
+            set_dpi=Mock(return_value=True),
+        )
+        engine.hook._hid_gesture = hg
+        seen_dpi = []
+        engine.set_dpi_read_callback(seen_dpi.append)
+
+        with patch("core.engine.time.sleep") as sleep_mock:
+            result = engine._run_saved_settings_replay()
+
+        self.assertTrue(result)
+        # set_dpi was called in Phase A and Phase B
+        self.assertGreaterEqual(hg.set_dpi.call_count, 1)
+        hg.set_dpi.assert_any_call(2400)
+        self.assertIn(2400, seen_dpi)
+
+    def test_engine_set_dpi_propagates_desired_dpi_to_hid_gesture(self):
+        engine = self._make_engine()
+        hg = SimpleNamespace(
+            connected_device=SimpleNamespace(name="MX Master 3S"),
+            dpi_supported=True,
+            set_desired_dpi=Mock(),
+            set_dpi=Mock(return_value=True),
+        )
+        engine.hook._hid_gesture = hg
+        result = engine.set_dpi(2400)
+        self.assertTrue(result)
+        hg.set_desired_dpi.assert_called_once_with(2400)
+        hg.set_dpi.assert_called_once_with(2400)
 
 
 if __name__ == "__main__":

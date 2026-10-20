@@ -224,6 +224,11 @@ WM_APP_INJECT_SHIFT_HSCROLL = WM_APP + 3
 
 WM_DEVICECHANGE = 0x0219
 DBT_DEVNODES_CHANGED = 0x0007
+DBT_DEVICEARRIVAL = 0x8000
+
+WM_POWERBROADCAST = 0x0218
+PBT_APMRESUMEAUTOMATIC = 0x0012
+PBT_APMRESUMESUSPEND = 0x0007
 
 PostMessageW = windll.user32.PostMessageW
 PostMessageW.argtypes = [wintypes.HWND, c_uint, wintypes.WPARAM, wintypes.LPARAM]
@@ -256,6 +261,8 @@ class MouseHook(BaseMouseHook):
         self._startup_ok = False
         self._prev_raw_buttons = {}
         self._last_rehook_time = 0
+        self._last_resume_at = 0.0
+        self._RESUME_RECONNECT_DELAY_S = 1.0
         # Per-button slide gesture: last cursor position while an owner button
         # is held, to derive per-move deltas from the LL hook's absolute point.
         self._btn_gesture_last_x = 0
@@ -533,8 +540,13 @@ class MouseHook(BaseMouseHook):
                 _inject_scroll_impl(MOUSEEVENTF_HWHEEL, delta)
             return 0
 
+        if msg == WM_POWERBROADCAST:
+            if wParam in (PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND):
+                self._start_resume_recovery("system wake")
+            return 1
+
         if msg == WM_DEVICECHANGE:
-            if wParam == DBT_DEVNODES_CHANGED:
+            if wParam in (DBT_DEVNODES_CHANGED, DBT_DEVICEARRIVAL):
                 self._on_device_change()
             return 0
 
@@ -706,6 +718,31 @@ class MouseHook(BaseMouseHook):
         self._device_name_cache.clear()
         self._prev_raw_buttons.clear()
         self._reinstall_hook()
+        hg = self._hid_gesture
+        if hg is not None:
+            try:
+                hg.force_reconnect()
+            except Exception as exc:
+                print(f"[MouseHook] device change reconnect request failed: {exc}")
+
+    def _start_resume_recovery(self, reason="system wake"):
+        now = time.time()
+        if now - getattr(self, "_last_resume_at", 0.0) < 3.0:
+            return False
+        self._last_resume_at = now
+        print(f"[MouseHook] Resume detected ({reason}) — recovering")
+        threading.Thread(
+            target=self._resume_recovery_worker,
+            daemon=True,
+            name="MouseHook-resume",
+        ).start()
+        return True
+
+    def _resume_recovery_worker(self):
+        time.sleep(getattr(self, "_RESUME_RECONNECT_DELAY_S", 1.0))
+        if not self._running:
+            return
+        self._on_device_change()
 
     def _reinstall_hook(self):
         if self._hook:

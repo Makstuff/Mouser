@@ -1741,5 +1741,60 @@ class GestureEventFamilyTests(unittest.TestCase):
         self.assertEqual(mouse_hook.MouseEvent.SENSE_SWIPE_LEFT, "sense_swipe_left")
 
 
+class WindowsMouseHookWakeTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only tests")
+    def test_power_broadcast_system_wake_triggers_resume_recovery(self):
+        from core.mouse_hook_windows import (
+            MouseHook,
+            WM_POWERBROADCAST,
+            PBT_APMRESUMEAUTOMATIC,
+            PBT_APMRESUMESUSPEND,
+        )
+
+        hook = MouseHook()
+        hook._running = True
+        hook._hid_gesture = Mock()
+        hook._start_resume_recovery = Mock(return_value=True)
+
+        res = hook._ri_wndproc(0, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, 0)
+        self.assertEqual(res, 1)
+        hook._start_resume_recovery.assert_called_with("system wake")
+
+        hook._start_resume_recovery.reset_mock()
+        res = hook._ri_wndproc(0, WM_POWERBROADCAST, PBT_APMRESUMESUSPEND, 0)
+        self.assertEqual(res, 1)
+        hook._start_resume_recovery.assert_called_with("system wake")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only tests")
+    def test_device_change_device_arrival_triggers_reconnect(self):
+        from core.mouse_hook_windows import (
+            MouseHook,
+            WM_DEVICECHANGE,
+            DBT_DEVICEARRIVAL,
+        )
+
+        hook = MouseHook()
+        hook._running = True
+        hook._hid_gesture = Mock()
+        hook._on_device_change = Mock()
+
+        res = hook._ri_wndproc(0, WM_DEVICECHANGE, DBT_DEVICEARRIVAL, 0)
+        self.assertEqual(res, 0)
+        hook._on_device_change.assert_called_once()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only tests")
+    def test_resume_recovery_worker_calls_force_reconnect(self):
+        from core.mouse_hook_windows import MouseHook
+
+        hook = MouseHook()
+        hook._running = True
+        hook._RESUME_RECONNECT_DELAY_S = 0.0
+        hook._hid_gesture = Mock()
+        hook._reinstall_hook = Mock()
+
+        hook._resume_recovery_worker()
+        hook._hid_gesture.force_reconnect.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
