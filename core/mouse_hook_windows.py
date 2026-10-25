@@ -230,6 +230,11 @@ WM_POWERBROADCAST = 0x0218
 PBT_APMRESUMEAUTOMATIC = 0x0012
 PBT_APMRESUMESUSPEND = 0x0007
 
+try:
+    WM_TASKBARCREATED = windll.user32.RegisterWindowMessageW("TaskbarCreated")
+except Exception:
+    WM_TASKBARCREATED = 0
+
 PostMessageW = windll.user32.PostMessageW
 PostMessageW.argtypes = [wintypes.HWND, c_uint, wintypes.WPARAM, wintypes.LPARAM]
 PostMessageW.restype = wintypes.BOOL
@@ -262,6 +267,7 @@ class MouseHook(BaseMouseHook):
         self._prev_raw_buttons = {}
         self._last_rehook_time = 0
         self._last_resume_at = 0.0
+        self._power_notify = None
         self._RESUME_RECONNECT_DELAY_S = 1.0
         # Per-button slide gesture: last cursor position while an owner button
         # is held, to derive per-move deltas from the LL hook's absolute point.
@@ -345,6 +351,8 @@ class MouseHook(BaseMouseHook):
 
             if flags & INJECTED_FLAG:
                 return CallNextHookEx(self._hook, nCode, wParam, lParam)
+
+            self._notify_hid_activity()
 
             # KVM / cold-start guard: when no Logitech is currently bound to
             # this host, the WH_MOUSE_LL hook must be a complete pass-through.
@@ -540,6 +548,16 @@ class MouseHook(BaseMouseHook):
                 _inject_scroll_impl(MOUSEEVENTF_HWHEEL, delta)
             return 0
 
+        if WM_TASKBARCREATED and msg == WM_TASKBARCREATED:
+            print("[MouseHook] TaskbarCreated message received from Windows Explorer")
+            cb = getattr(self, "_on_taskbar_created", None)
+            if cb:
+                try:
+                    cb()
+                except Exception as exc:
+                    print(f"[MouseHook] taskbar created callback error: {exc}")
+            return 0
+
         if msg == WM_POWERBROADCAST:
             if wParam in (PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND):
                 self._start_resume_recovery("system wake")
@@ -651,15 +669,25 @@ class MouseHook(BaseMouseHook):
 
         if RegisterRawInputDevices(devices, 4, sizeof(RAWINPUTDEVICE)):
             print("[MouseHook] Raw Input: mice + Logitech HID + consumer")
-            return True
-        if RegisterRawInputDevices(devices, 2, sizeof(RAWINPUTDEVICE)):
+        elif RegisterRawInputDevices(devices, 2, sizeof(RAWINPUTDEVICE)):
             print("[MouseHook] Raw Input: mice + Logitech HID short")
-            return True
-        if RegisterRawInputDevices(devices, 1, sizeof(RAWINPUTDEVICE)):
+        elif RegisterRawInputDevices(devices, 1, sizeof(RAWINPUTDEVICE)):
             print("[MouseHook] Raw Input: mice only")
-            return True
-        print("[MouseHook] Raw Input registration failed")
-        return False
+        else:
+            print("[MouseHook] Raw Input registration failed")
+
+        # Register for power notifications so hidden window receives WM_POWERBROADCAST on system wake
+        self._power_notify = None
+        try:
+            DEVICE_NOTIFY_WINDOW_HANDLE = 0
+            user32 = windll.user32
+            if hasattr(user32, "RegisterSuspendResumeNotification"):
+                self._power_notify = user32.RegisterSuspendResumeNotification(
+                    self._ri_hwnd, DEVICE_NOTIFY_WINDOW_HANDLE
+                )
+        except Exception as exc:
+            print(f"[MouseHook] RegisterSuspendResumeNotification note: {exc}")
+        return True
 
     def _dispatch_worker(self):
         while self._running:
@@ -700,6 +728,12 @@ class MouseHook(BaseMouseHook):
             TranslateMessage(ctypes.byref(message))
             DispatchMessageW(ctypes.byref(message))
 
+        if getattr(self, "_power_notify", None):
+            try:
+                windll.user32.UnregisterSuspendResumeNotification(self._power_notify)
+            except Exception:
+                pass
+            self._power_notify = None
         if self._ri_hwnd:
             DestroyWindow(self._ri_hwnd)
             self._ri_hwnd = None
@@ -739,10 +773,25 @@ class MouseHook(BaseMouseHook):
         return True
 
     def _resume_recovery_worker(self):
-        time.sleep(getattr(self, "_RESUME_RECONNECT_DELAY_S", 1.0))
+        delay = getattr(self, "_RESUME_RECONNECT_DELAY_S", 1.0)
+        time.sleep(delay)
         if not self._running:
             return
         self._on_device_change()
+        followup_delay = getattr(
+            self, "_RESUME_FOLLOWUP_DELAY_S", 2.0 if delay > 0 else 0.0
+        )
+        if followup_delay > 0:
+            time.sleep(followup_delay)
+        if not self._running:
+            return
+        hg = self._hid_gesture
+        if hg is not None and not getattr(hg, "_connected", False):
+            print("[MouseHook] Post-resume follow-up: requesting reconnect")
+            try:
+                hg.force_reconnect()
+            except Exception:
+                pass
 
     def _reinstall_hook(self):
         if self._hook:

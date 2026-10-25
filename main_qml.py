@@ -1419,6 +1419,12 @@ def main():
     ) else None)
     tray.show()
 
+    def _on_taskbar_created():
+        print("[Mouser] Explorer taskbar created/restarted -- refreshing tray icon")
+        QTimer.singleShot(500, lambda: (tray.hide(), tray.show()))
+
+    engine.set_taskbar_created_callback(_on_taskbar_created)
+
     # macOS only: install a native NSStatusItem so the menu-bar icon
     # can use AppKit's variable-length item path on notched MacBooks
     # where Qt's square status item can disappear under constrained

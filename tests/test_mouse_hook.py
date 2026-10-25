@@ -1790,11 +1790,27 @@ class WindowsMouseHookWakeTests(unittest.TestCase):
         hook._running = True
         hook._RESUME_RECONNECT_DELAY_S = 0.0
         hook._hid_gesture = Mock()
+        hook._hid_gesture._connected = True
         hook._reinstall_hook = Mock()
 
         hook._resume_recovery_worker()
         hook._hid_gesture.force_reconnect.assert_called_once()
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only tests")
+    def test_taskbar_created_triggers_callback(self):
+        from core.mouse_hook_windows import MouseHook, WM_TASKBARCREATED
+
+        hook = MouseHook()
+        hook._running = True
+        cb = Mock()
+        hook.set_taskbar_created_callback(cb)
+
+        if WM_TASKBARCREATED:
+            res = hook._ri_wndproc(0, WM_TASKBARCREATED, 0, 0)
+            self.assertEqual(res, 0)
+            cb.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
+

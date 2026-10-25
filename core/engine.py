@@ -1470,6 +1470,11 @@ class Engine:
             except Exception:
                 pass
 
+    def set_taskbar_created_callback(self, cb):
+        """Register ``cb()`` invoked when Windows Explorer taskbar is created/restarted."""
+        if hasattr(self.hook, "set_taskbar_created_callback"):
+            self.hook.set_taskbar_created_callback(cb)
+
     @property
     def device_connected(self):
         return self._hid_runtime_state().input_ready

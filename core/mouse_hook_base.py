@@ -58,6 +58,8 @@ class BaseMouseHook:
         self.divert_dpi_switch = False
         self.wheel_native_invert_active = False
         self._gesture_direction_enabled = False
+        self._last_activity_notify_time = 0.0
+        self._on_taskbar_created = None
         self._gesture_os_passthrough = False
         self._gesture_move_callback = None
         # Primary gesture control recognizer (thumb on MX3/3S/classic,
@@ -331,6 +333,25 @@ class BaseMouseHook:
     def set_battery_notify_callback(self, cb):
         """Register ``cb(level, charging)`` for unsolicited battery events."""
         self._battery_notify_cb = cb
+
+    def set_taskbar_created_callback(self, cb):
+        """Register callback invoked when Windows Explorer taskbar is created or restarts."""
+        self._on_taskbar_created = cb
+
+    def _notify_hid_activity(self):
+        """Notify HID gesture subsystem of user mouse movement or click activity."""
+        hg = getattr(self, "_hid_gesture", None)
+        if hg is None:
+            return
+        if getattr(hg, "_device_asleep", False) or not getattr(hg, "_connected", True):
+            if hasattr(hg, "notify_user_activity"):
+                hg.notify_user_activity()
+        else:
+            now = time.monotonic()
+            if now - getattr(self, "_last_activity_notify_time", 0.0) > 10.0:
+                self._last_activity_notify_time = now
+                if hasattr(hg, "notify_user_activity"):
+                    hg.notify_user_activity()
 
     @property
     def device_connected(self):

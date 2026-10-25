@@ -1635,6 +1635,32 @@ class TestHidDpiRecoveryAndReconnect(unittest.TestCase):
         listener._on_report(raw)
         self.assertTrue(listener._reconnect_requested)
 
+    def test_notify_user_activity_wakes_asleep_device(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._device_asleep = True
+        self.assertFalse(listener._wake_requested)
+        listener.notify_user_activity()
+        self.assertTrue(listener._wake_requested)
+
+    def test_notify_user_activity_reconnects_when_disconnected(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._device_asleep = False
+        listener._connected = False
+        listener._running = True
+        self.assertFalse(listener._reconnect_requested)
+        listener.notify_user_activity()
+        self.assertTrue(listener._reconnect_requested)
+
+    def test_notify_user_activity_verifies_settings_after_idle(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._device_asleep = False
+        listener._connected = True
+        listener._last_user_activity_time = 0.0
+        self.assertFalse(listener._verify_settings_requested)
+        listener.notify_user_activity()
+        self.assertTrue(listener._verify_settings_requested)
+
 
 if __name__ == "__main__":
     unittest.main()
+

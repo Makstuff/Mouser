@@ -72,6 +72,7 @@ class ApplyLoginStartupWindowsTests(unittest.TestCase):
         mock_wr.HKEY_CURRENT_USER = 1
         mock_wr.KEY_SET_VALUE = 2
         mock_wr.REG_SZ = 1
+        mock_wr.REG_BINARY = 3
         mock_wr.OpenKey.return_value = mock_key
 
         with (
@@ -82,12 +83,15 @@ class ApplyLoginStartupWindowsTests(unittest.TestCase):
         ):
             st.apply_login_startup(True)
 
-        mock_wr.OpenKey.assert_called_once()
-        mock_wr.SetValueEx.assert_called_once_with(
+        self.assertEqual(mock_wr.OpenKey.call_count, 2)
+        mock_wr.SetValueEx.assert_any_call(
             mock_key, st.RUN_VALUE_NAME, 0, mock_wr.REG_SZ, "THE_CMD"
         )
+        mock_wr.SetValueEx.assert_any_call(
+            mock_key, st.RUN_VALUE_NAME, 0, mock_wr.REG_BINARY, st.STARTUP_APPROVED_ENABLED_BINARY
+        )
         mock_wr.DeleteValue.assert_not_called()
-        mock_wr.CloseKey.assert_called_once_with(mock_key)
+        self.assertEqual(mock_wr.CloseKey.call_count, 2)
 
     def test_disabled_deletes_registry_value(self):
         mock_wr = MagicMock()
@@ -95,6 +99,7 @@ class ApplyLoginStartupWindowsTests(unittest.TestCase):
         mock_wr.HKEY_CURRENT_USER = 1
         mock_wr.KEY_SET_VALUE = 2
         mock_wr.REG_SZ = 1
+        mock_wr.REG_BINARY = 3
         mock_wr.OpenKey.return_value = mock_key
 
         with (
@@ -105,8 +110,9 @@ class ApplyLoginStartupWindowsTests(unittest.TestCase):
             st.apply_login_startup(False)
 
         mock_wr.SetValueEx.assert_not_called()
-        mock_wr.DeleteValue.assert_called_once_with(mock_key, st.RUN_VALUE_NAME)
-        mock_wr.CloseKey.assert_called_once_with(mock_key)
+        self.assertEqual(mock_wr.DeleteValue.call_count, 2)
+        mock_wr.DeleteValue.assert_any_call(mock_key, st.RUN_VALUE_NAME)
+        self.assertEqual(mock_wr.CloseKey.call_count, 2)
 
     def test_disabled_ignores_missing_value(self):
         mock_wr = MagicMock()
@@ -121,7 +127,16 @@ class ApplyLoginStartupWindowsTests(unittest.TestCase):
         ):
             st.apply_login_startup(False)
 
-        mock_wr.CloseKey.assert_called_once_with(mock_key)
+        self.assertEqual(mock_wr.CloseKey.call_count, 2)
+
+    def test_build_run_command_start_hidden(self):
+        with (
+            patch.object(sys, "executable", r"C:\Apps\Mouser App\Mouser.exe"),
+            patch.object(sys, "frozen", True, create=True),
+            patch("os.path.abspath", side_effect=lambda p: p),
+        ):
+            cmd = st.build_run_command(start_hidden=True)
+        self.assertEqual(cmd, r'"C:\Apps\Mouser App\Mouser.exe" --start-hidden')
 
 
 class ApplyLoginStartupMacTests(unittest.TestCase):

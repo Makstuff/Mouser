@@ -9,6 +9,10 @@ import tempfile
 
 # Windows
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+STARTUP_APPROVED_RUN_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+)
+STARTUP_APPROVED_ENABLED_BINARY = b"\x02" + b"\x00" * 11
 RUN_VALUE_NAME = "Mouser"
 
 # macOS
@@ -38,14 +42,18 @@ def _quote_arg(s: str) -> str:
     return s
 
 
-def build_run_command() -> str:
+def build_run_command(*, start_hidden: bool = False) -> str:
     """Windows: command line stored in the HKCU Run value."""
     exe = os.path.abspath(sys.executable)
     exe_q = _quote_arg(exe)
     if getattr(sys, "frozen", False):
-        return exe_q
-    script = os.path.abspath(sys.argv[0])
-    return f"{exe_q} {_quote_arg(script)}"
+        cmd = exe_q
+    else:
+        script = os.path.abspath(sys.argv[0])
+        cmd = f"{exe_q} {_quote_arg(script)}"
+    if start_hidden:
+        cmd += " --start-hidden"
+    return cmd
 
 
 def _program_arguments():
@@ -68,7 +76,7 @@ def _source_checkout_python() -> str | None:
     if sys.platform == "win32":
         candidate = os.path.join(root_dir, ".venv", "Scripts", "python.exe")
     else:
-        candidate = os.path.join(root_dir, ".venv", "bin", "python")
+        candidate = os.path.join(root_dir, ".venv", "bin", "python").replace("\\", "/")
     if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
         return candidate
     return None
@@ -325,6 +333,35 @@ def _get_winreg():
     return winreg
 
 
+def _sync_windows_startup_approved(winreg, enabled: bool) -> None:
+    try:
+        appr_key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            STARTUP_APPROVED_RUN_KEY,
+            0,
+            winreg.KEY_SET_VALUE,
+        )
+        try:
+            if enabled:
+                reg_binary = getattr(winreg, "REG_BINARY", 3)
+                winreg.SetValueEx(
+                    appr_key,
+                    RUN_VALUE_NAME,
+                    0,
+                    reg_binary,
+                    STARTUP_APPROVED_ENABLED_BINARY,
+                )
+            else:
+                try:
+                    winreg.DeleteValue(appr_key, RUN_VALUE_NAME)
+                except FileNotFoundError:
+                    pass
+        finally:
+            winreg.CloseKey(appr_key)
+    except Exception:
+        pass
+
+
 def _apply_windows(enabled: bool) -> None:
     if sys.platform != "win32":
         return
@@ -338,7 +375,7 @@ def _apply_windows(enabled: bool) -> None:
     try:
         if enabled:
             winreg.SetValueEx(
-                key, RUN_VALUE_NAME, 0, winreg.REG_SZ, build_run_command()
+                key, RUN_VALUE_NAME, 0, winreg.REG_SZ, build_run_command(start_hidden=True)
             )
         else:
             try:
@@ -348,11 +385,14 @@ def _apply_windows(enabled: bool) -> None:
     finally:
         winreg.CloseKey(key)
 
+    _sync_windows_startup_approved(winreg, enabled)
+
 
 def _macos_plist_path() -> str:
-    return os.path.expanduser(
+    path = os.path.expanduser(
         os.path.join("~/Library/LaunchAgents", MACOS_PLIST_NAME)
     )
+    return path.replace("\\", "/") if sys.platform == "win32" else path
 
 
 def _launchctl_run(args: list) -> subprocess.CompletedProcess:

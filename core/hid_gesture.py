@@ -1114,6 +1114,11 @@ class HidGestureListener:
         self._smart_shift_slot_lock = threading.Lock()
         self._smart_shift_event = threading.Event()
         self._reconnect_requested = False
+        self._device_asleep = False
+        self._wake_requested = False
+        self._verify_settings_requested = False
+        self._last_user_activity_time = 0.0
+        self._last_activity_reconnect_time = 0.0
         # signature -> monotonic deadline; see _REPROG_ABSENT_COOLDOWN_S.
         self._reprog_absent_until = {}
         self._pending_battery = None
@@ -2124,6 +2129,26 @@ class HidGestureListener:
         re-applying all button diverts (including CID 0x00C4).
         """
         self._reconnect_requested = True
+
+    def notify_user_activity(self):
+        """Notify that the user has moved or clicked the mouse.
+        Wakes the device if it was believed to be asleep or triggers a reconnect
+        if disconnected or settings need to be restored."""
+        if getattr(self, "_device_asleep", False):
+            self._wake_requested = True
+            return
+        if not getattr(self, "_connected", True) and getattr(self, "_running", False):
+            now = time.monotonic()
+            if now - getattr(self, "_last_activity_reconnect_time", 0.0) >= 3.0:
+                self._last_activity_reconnect_time = now
+                self.force_reconnect()
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_last_user_activity_time", 0.0) > 10.0:
+            self._last_user_activity_time = now
+            self._verify_settings_requested = True
+        else:
+            self._last_user_activity_time = now
 
     def read_smart_shift(self):
         """Queue a Smart Shift read.
@@ -3466,6 +3491,7 @@ class HidGestureListener:
             _SLEEP_TIMEOUT_S = 300      # abandon handle after 5 min asleep
             self._consecutive_request_timeouts = 0
             _device_asleep = False
+            self._device_asleep = False
             _device_sleep_time = None
             try:
                 while self._running:
@@ -3473,9 +3499,21 @@ class HidGestureListener:
                         self._reconnect_requested = False
                         raise IOError("reconnect requested")
 
+                    if self._wake_requested or (_device_asleep and self._reconnect_requested):
+                        self._wake_requested = False
+                        _device_asleep = False
+                        self._device_asleep = False
+                        _device_sleep_time = None
+                        _no_data_count = 0
+                        self._consecutive_request_timeouts = 0
+                        self._connected = True
+                        print("[HidGesture] User activity detected while asleep — waking device and restoring settings")
+                        self.force_reconnect()
+
                     if self._consecutive_request_timeouts >= _CONSECUTIVE_TIMEOUT_RECONNECT:
                         if not _device_asleep:
                             _device_asleep = True
+                            self._device_asleep = True
                             _device_sleep_time = time.monotonic()
                             print("[HidGesture] Device appears asleep "
                                   "— suppressing requests, listening for wake")
@@ -3497,9 +3535,21 @@ class HidGestureListener:
                                   "— falling back to full reconnect")
                             raise IOError("sleep timeout — device may be gone")
                         self._drain_pending_requests()
-                        raw = self._rx(1000)
+                        raw = self._rx(250)
+                        if self._wake_requested or self._reconnect_requested:
+                            self._wake_requested = False
+                            _device_asleep = False
+                            self._device_asleep = False
+                            _device_sleep_time = None
+                            _no_data_count = 0
+                            self._consecutive_request_timeouts = 0
+                            self._connected = True
+                            print("[HidGesture] Device woke from sleep — reconnecting to restore settings")
+                            self.force_reconnect()
+                            continue
                         if raw:
                             _device_asleep = False
+                            self._device_asleep = False
                             _device_sleep_time = None
                             _no_data_count = 0
                             self._consecutive_request_timeouts = 0
@@ -3508,6 +3558,10 @@ class HidGestureListener:
                             self._on_report(raw)
                             self.force_reconnect()
                         continue
+
+                    if self._verify_settings_requested:
+                        self._verify_settings_requested = False
+                        self._check_and_restore_settings_if_reset()
 
                     # Apply any queued DPI command
                     if self._pending_dpi is not None:
@@ -3591,6 +3645,7 @@ class HidGestureListener:
             self._rawxy_enabled = False
             self._connected_device_info = None
             self._reconnect_requested = False
+            self._device_asleep = False
             if self._connected:
                 self._connected = False
                 if self._on_disconnect:
