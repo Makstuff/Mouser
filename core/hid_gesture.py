@@ -1116,9 +1116,6 @@ class HidGestureListener:
         self._reconnect_requested = False
         self._device_asleep = False
         self._wake_requested = False
-        self._verify_settings_requested = False
-        self._last_user_activity_time = 0.0
-        self._last_activity_reconnect_time = 0.0
         # signature -> monotonic deadline; see _REPROG_ABSENT_COOLDOWN_S.
         self._reprog_absent_until = {}
         self._pending_battery = None
@@ -2132,23 +2129,9 @@ class HidGestureListener:
 
     def notify_user_activity(self):
         """Notify that the user has moved or clicked the mouse.
-        Wakes the device if it was believed to be asleep or triggers a reconnect
-        if disconnected or settings need to be restored."""
+        Wakes the device if it was believed to be asleep."""
         if getattr(self, "_device_asleep", False):
             self._wake_requested = True
-            return
-        if not getattr(self, "_connected", True) and getattr(self, "_running", False):
-            now = time.monotonic()
-            if now - getattr(self, "_last_activity_reconnect_time", 0.0) >= 3.0:
-                self._last_activity_reconnect_time = now
-                self.force_reconnect()
-            return
-        now = time.monotonic()
-        if now - getattr(self, "_last_user_activity_time", 0.0) > 10.0:
-            self._last_user_activity_time = now
-            self._verify_settings_requested = True
-        else:
-            self._last_user_activity_time = now
 
     def read_smart_shift(self):
         """Queue a Smart Shift read.
@@ -2798,10 +2781,11 @@ class HidGestureListener:
                         pass
 
     def _check_and_restore_settings_if_reset(self):
-        """Called on report arrival after silence (_no_data_count >= _STALE_HOLD_LIMIT).
+        """Called on report arrival after silence (_no_data_count >= _STALE_HOLD_LIMIT)
+        or when waking from sensor sleep.
         If the mouse power-cycled or woke from deep sensor sleep, runtime registers
         (DPI, button diversions, SmartShift) may have reverted to hardware defaults.
-        This checks if settings were reset and immediately restores them.
+        This checks if settings were reset and immediately restores them without dropping connection.
         """
         now = time.monotonic()
         if now - getattr(self, "_last_reset_check_time", 0.0) < 3.0:
@@ -2810,8 +2794,6 @@ class HidGestureListener:
 
         if self._dev is None:
             return
-
-        needs_reconnect = False
 
         # 1. Check DPI if adjustable DPI feature is active and desired DPI is known
         if self._dpi_idx is not None and self._desired_dpi is not None:
@@ -2830,25 +2812,23 @@ class HidGestureListener:
                         set_resp = self._request(self._dpi_idx, 3, [0x00, hi, lo], timeout_ms=300)
                         if set_resp:
                             print(f"[HidGesture] Restored DPI to {self._desired_dpi}")
-                        needs_reconnect = True
             except Exception as exc:
                 print(f"[HidGesture] DPI reset check failed: {exc}")
 
         # 2. Check gesture button diversion if REPROG_V4 is active
-        if not needs_reconnect and self._feat_idx is not None and self._gesture_cid:
+        if self._feat_idx is not None and self._gesture_cid:
             try:
                 cid_resp = self._get_cid_reporting(self._gesture_cid)
                 if cid_resp:
                     _, _, _, _, p = cid_resp
-                    reporting_flags = p[0] if p else 0
+                    # REPROG_V4 function 2 response: [cid_hi, cid_lo, flags, mapped_hi, mapped_lo]
+                    reporting_flags = p[2] if len(p) >= 3 else p[0]
                     if reporting_flags == 0:
                         print("[HidGesture] Button diversion reset detected — restoring")
-                        needs_reconnect = True
+                        divert_flags = _DIVERT_RAW_XY if self._rawxy_enabled else _DIVERT_BUTTON_ONLY
+                        self._set_cid_reporting(self._gesture_cid, divert_flags)
             except Exception as exc:
                 print(f"[HidGesture] Button reporting check failed: {exc}")
-
-        if needs_reconnect:
-            self.force_reconnect()
 
     def _on_report(self, raw):
         """Inspect an incoming HID++ report for diverted button / raw XY events."""
@@ -3499,17 +3479,6 @@ class HidGestureListener:
                         self._reconnect_requested = False
                         raise IOError("reconnect requested")
 
-                    if self._wake_requested or (_device_asleep and self._reconnect_requested):
-                        self._wake_requested = False
-                        _device_asleep = False
-                        self._device_asleep = False
-                        _device_sleep_time = None
-                        _no_data_count = 0
-                        self._consecutive_request_timeouts = 0
-                        self._connected = True
-                        print("[HidGesture] User activity detected while asleep — waking device and restoring settings")
-                        self.force_reconnect()
-
                     if self._consecutive_request_timeouts >= _CONSECUTIVE_TIMEOUT_RECONNECT:
                         if not _device_asleep:
                             _device_asleep = True
@@ -3520,13 +3489,6 @@ class HidGestureListener:
                             self._force_release_stale_holds()
                             self._drain_pending_requests()
                             self._consecutive_request_timeouts = 0
-                            if self._connected:
-                                self._connected = False
-                                if self._on_disconnect:
-                                    try:
-                                        self._on_disconnect()
-                                    except Exception:
-                                        pass
 
                     if _device_asleep:
                         if (time.monotonic() - _device_sleep_time
@@ -3536,16 +3498,15 @@ class HidGestureListener:
                             raise IOError("sleep timeout — device may be gone")
                         self._drain_pending_requests()
                         raw = self._rx(250)
-                        if self._wake_requested or self._reconnect_requested:
+                        if self._wake_requested:
                             self._wake_requested = False
                             _device_asleep = False
                             self._device_asleep = False
                             _device_sleep_time = None
                             _no_data_count = 0
                             self._consecutive_request_timeouts = 0
-                            self._connected = True
-                            print("[HidGesture] Device woke from sleep — reconnecting to restore settings")
-                            self.force_reconnect()
+                            print("[HidGesture] Device woke from sleep — restoring settings")
+                            self._check_and_restore_settings_if_reset()
                             continue
                         if raw:
                             _device_asleep = False
@@ -3553,15 +3514,10 @@ class HidGestureListener:
                             _device_sleep_time = None
                             _no_data_count = 0
                             self._consecutive_request_timeouts = 0
-                            self._connected = True
-                            print("[HidGesture] Device woke from sleep — reconnecting to restore settings")
+                            print("[HidGesture] Device woke from sleep — restoring settings")
+                            self._check_and_restore_settings_if_reset()
                             self._on_report(raw)
-                            self.force_reconnect()
                         continue
-
-                    if self._verify_settings_requested:
-                        self._verify_settings_requested = False
-                        self._check_and_restore_settings_if_reset()
 
                     # Apply any queued DPI command
                     if self._pending_dpi is not None:

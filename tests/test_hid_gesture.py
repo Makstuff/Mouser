@@ -1557,7 +1557,7 @@ class TestHidDpiRecoveryAndReconnect(unittest.TestCase):
 
         # Verified that setSensorDpi was sent with 2400 (0x0960)
         listener._request.assert_any_call(0x05, 3, [0x00, 0x09, 0x60], timeout_ms=300)
-        self.assertTrue(listener._reconnect_requested)
+        self.assertFalse(listener._reconnect_requested)
 
     def test_check_and_restore_settings_noop_when_dpi_matches(self):
         listener = hid_gesture.HidGestureListener()
@@ -1588,11 +1588,15 @@ class TestHidDpiRecoveryAndReconnect(unittest.TestCase):
         listener._dpi_idx = None
         listener._feat_idx = 0x03
         listener._gesture_cid = 0x00C4
+        listener._rawxy_enabled = False
+        listener._set_cid_reporting = Mock()
         # Return reporting flags = 0 (all divert flags cleared on power-cycle)
-        listener._get_cid_reporting = Mock(return_value=(0xFF, 0x03, 2, 0x0A, [0x00]))
+        # REPROG_V4 function 2 response: [cid_hi, cid_lo, flags, mapped_hi, mapped_lo]
+        listener._get_cid_reporting = Mock(return_value=(0xFF, 0x03, 2, 0x0A, [0x00, 0xC4, 0x00, 0x00, 0x00]))
 
         listener._check_and_restore_settings_if_reset()
-        self.assertTrue(listener._reconnect_requested)
+        listener._set_cid_reporting.assert_called_once_with(0x00C4, hid_gesture._DIVERT_BUTTON_ONLY)
+        self.assertFalse(listener._reconnect_requested)
 
     def test_receiver_connection_notification_triggers_force_reconnect(self):
         listener = hid_gesture.HidGestureListener()
@@ -1642,23 +1646,12 @@ class TestHidDpiRecoveryAndReconnect(unittest.TestCase):
         listener.notify_user_activity()
         self.assertTrue(listener._wake_requested)
 
-    def test_notify_user_activity_reconnects_when_disconnected(self):
+    def test_notify_user_activity_noop_when_not_asleep(self):
         listener = hid_gesture.HidGestureListener()
         listener._device_asleep = False
-        listener._connected = False
-        listener._running = True
-        self.assertFalse(listener._reconnect_requested)
+        listener._wake_requested = False
         listener.notify_user_activity()
-        self.assertTrue(listener._reconnect_requested)
-
-    def test_notify_user_activity_verifies_settings_after_idle(self):
-        listener = hid_gesture.HidGestureListener()
-        listener._device_asleep = False
-        listener._connected = True
-        listener._last_user_activity_time = 0.0
-        self.assertFalse(listener._verify_settings_requested)
-        listener.notify_user_activity()
-        self.assertTrue(listener._verify_settings_requested)
+        self.assertFalse(listener._wake_requested)
 
 
 if __name__ == "__main__":

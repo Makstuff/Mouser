@@ -343,15 +343,9 @@ class BaseMouseHook:
         hg = getattr(self, "_hid_gesture", None)
         if hg is None:
             return
-        if getattr(hg, "_device_asleep", False) or not getattr(hg, "_connected", True):
+        if getattr(hg, "_device_asleep", False):
             if hasattr(hg, "notify_user_activity"):
                 hg.notify_user_activity()
-        else:
-            now = time.monotonic()
-            if now - getattr(self, "_last_activity_notify_time", 0.0) > 10.0:
-                self._last_activity_notify_time = now
-                if hasattr(hg, "notify_user_activity"):
-                    hg.notify_user_activity()
 
     @property
     def device_connected(self):
