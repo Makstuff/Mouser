@@ -343,7 +343,11 @@ class BaseMouseHook:
         hg = getattr(self, "_hid_gesture", None)
         if hg is None:
             return
-        if getattr(hg, "_device_asleep", False):
+        now = time.monotonic()
+        idle_duration = now - getattr(self, "_last_mouse_activity_time", 0.0)
+        self._last_mouse_activity_time = now
+        # If the mouse was idle for >= 3 seconds or device was flagged asleep, wake & verify settings
+        if idle_duration >= 3.0 or getattr(hg, "_device_asleep", False):
             if hasattr(hg, "notify_user_activity"):
                 hg.notify_user_activity()
 

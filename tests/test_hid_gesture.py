@@ -1646,12 +1646,11 @@ class TestHidDpiRecoveryAndReconnect(unittest.TestCase):
         listener.notify_user_activity()
         self.assertTrue(listener._wake_requested)
 
-    def test_notify_user_activity_noop_when_not_asleep(self):
+    def test_notify_user_activity_sets_wake_requested(self):
         listener = hid_gesture.HidGestureListener()
-        listener._device_asleep = False
         listener._wake_requested = False
         listener.notify_user_activity()
-        self.assertFalse(listener._wake_requested)
+        self.assertTrue(listener._wake_requested)
 
 
 if __name__ == "__main__":

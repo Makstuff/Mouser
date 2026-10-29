@@ -1810,6 +1810,28 @@ class WindowsMouseHookWakeTests(unittest.TestCase):
             self.assertEqual(res, 0)
             cb.assert_called_once()
 
+    def test_notify_hid_activity_triggers_wake_after_idle(self):
+        from core.mouse_hook_base import BaseMouseHook
+
+        hook = BaseMouseHook()
+        mock_hg = Mock()
+        mock_hg._device_asleep = False
+        hook._hid_gesture = mock_hg
+
+        # 1. First event with default _last_mouse_activity_time=0.0 triggers notification
+        hook._notify_hid_activity()
+        mock_hg.notify_user_activity.assert_called_once()
+
+        # 2. Continuous movement within 3.0s does not call notify_user_activity again
+        mock_hg.notify_user_activity.reset_mock()
+        hook._notify_hid_activity()
+        mock_hg.notify_user_activity.assert_not_called()
+
+        # 3. Movement resuming after 3.0s idle triggers notification
+        hook._last_mouse_activity_time -= 4.0
+        hook._notify_hid_activity()
+        mock_hg.notify_user_activity.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

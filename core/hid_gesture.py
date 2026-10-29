@@ -2129,9 +2129,9 @@ class HidGestureListener:
 
     def notify_user_activity(self):
         """Notify that the user has moved or clicked the mouse.
-        Wakes the device if it was believed to be asleep."""
-        if getattr(self, "_device_asleep", False):
-            self._wake_requested = True
+        Wakes the device if it was believed to be asleep, and triggers
+        settings verification/restoration if settings may have reset."""
+        self._wake_requested = True
 
     def read_smart_shift(self):
         """Queue a Smart Shift read.
@@ -2812,8 +2812,12 @@ class HidGestureListener:
                         set_resp = self._request(self._dpi_idx, 3, [0x00, hi, lo], timeout_ms=300)
                         if set_resp:
                             print(f"[HidGesture] Restored DPI to {self._desired_dpi}")
+                else:
+                    # Mouse did not respond yet (e.g. RF link still waking) — allow rapid retry
+                    self._last_reset_check_time = now - 2.5
             except Exception as exc:
                 print(f"[HidGesture] DPI reset check failed: {exc}")
+                self._last_reset_check_time = now - 2.5
 
         # 2. Check gesture button diversion if REPROG_V4 is active
         if self._feat_idx is not None and self._gesture_cid:
@@ -3466,7 +3470,7 @@ class HidGestureListener:
                     pass
             print("[HidGesture] Listening for gesture events…")
             _no_data_count = 0          # consecutive _rx() returning None
-            _STALE_HOLD_LIMIT = 3       # force-release held buttons after this many empty reads (~3 s)
+            _STALE_HOLD_LIMIT = 12      # force-release held buttons after this many empty reads (~3 s at 250ms)
             _CONSECUTIVE_TIMEOUT_RECONNECT = 3  # force reconnect after this many request timeouts
             _SLEEP_TIMEOUT_S = 300      # abandon handle after 5 min asleep
             self._consecutive_request_timeouts = 0
@@ -3535,7 +3539,13 @@ class HidGestureListener:
                         self._apply_pending_haptic()
                     if self._pending_force_sensing is not None:
                         self._apply_pending_force_sensing()
-                    raw = self._rx(1000)
+
+                    if self._wake_requested:
+                        self._wake_requested = False
+                        _no_data_count = 0
+                        self._check_and_restore_settings_if_reset()
+
+                    raw = self._rx(250)
                     if raw:
                         if _no_data_count >= _STALE_HOLD_LIMIT:
                             self._check_and_restore_settings_if_reset()
