@@ -1928,6 +1928,10 @@ class HidGestureListener:
     # ── DPI control ───────────────────────────────────────────────
 
     @property
+    def dpi_supported(self):
+        return self._dpi_idx is not None
+
+    @property
     def desired_dpi(self):
         return self._desired_dpi
 
@@ -2796,6 +2800,7 @@ class HidGestureListener:
             return
 
         # 1. Check DPI if adjustable DPI feature is active and desired DPI is known
+        dpi_probe_timed_out = False
         if self._dpi_idx is not None and self._desired_dpi is not None:
             try:
                 resp = self._request(self._dpi_idx, 2, [0x00], timeout_ms=300)
@@ -2814,13 +2819,16 @@ class HidGestureListener:
                             print(f"[HidGesture] Restored DPI to {self._desired_dpi}")
                 else:
                     # Mouse did not respond yet (e.g. RF link still waking) — allow rapid retry
+                    dpi_probe_timed_out = True
                     self._last_reset_check_time = now - 2.5
+            except IOError:
+                raise
             except Exception as exc:
                 print(f"[HidGesture] DPI reset check failed: {exc}")
                 self._last_reset_check_time = now - 2.5
 
-        # 2. Check gesture button diversion if REPROG_V4 is active
-        if self._feat_idx is not None and self._gesture_cid:
+        # 2. Check gesture button diversion if REPROG_V4 is active (skip if device timed out above)
+        if not dpi_probe_timed_out and self._feat_idx is not None and self._gesture_cid:
             try:
                 cid_resp = self._get_cid_reporting(self._gesture_cid)
                 if cid_resp:
@@ -2831,6 +2839,10 @@ class HidGestureListener:
                         print("[HidGesture] Button diversion reset detected — restoring")
                         divert_flags = _DIVERT_RAW_XY if self._rawxy_enabled else _DIVERT_BUTTON_ONLY
                         self._set_cid_reporting(self._gesture_cid, divert_flags)
+                        if self._extra_diverts:
+                            self._divert_extras()
+            except IOError:
+                raise
             except Exception as exc:
                 print(f"[HidGesture] Button reporting check failed: {exc}")
 
@@ -2981,9 +2993,23 @@ class HidGestureListener:
             cached.get("device") if isinstance(cached, dict) else None
         )
 
+        self._reconnect_requested = False
+        self._wake_requested = False
+
+        def _usage_priority(info):
+            up = int(info.get("usage_page", 0) or 0)
+            u = int(info.get("usage", 0) or 0)
+            if up in (0xFF00, 0xFF43):
+                if u in (0x0002, 0x0202):
+                    return 0
+                if u in (0x0001, 0x0201, 0x0000):
+                    return 1
+                return 2
+            return 3
+
         def _default_priority(info):
             name = (info.get("product_string") or "").lower()
-            return (1 if "receiver" in name else 0, name)
+            return (1 if "receiver" in name else 0, _usage_priority(info), name)
 
         # Negate the score so higher match (cached interface) sorts first.
         def _priority(info):
@@ -3033,9 +3059,15 @@ class HidGestureListener:
         }
         skip_cooled = bool(cooled) and len(cooled) < len(infos)
 
+        opened_long_hidpp_pids = set()
+
         for info in infos:
             cand_key = _candidate_cooldown_key(info)
-            if skip_cooled and cand_key in cooled:
+            is_cached_cand = (
+                cached_candidate is not None
+                and _candidate_matches_cache(info, cached_candidate)
+            )
+            if skip_cooled and cand_key in cooled and not is_cached_cand:
                 print(
                     "[HidGesture] Skipping recently-incompatible interface "
                     f"PID=0x{int(info.get('product_id', 0) or 0):04X} "
@@ -3045,6 +3077,11 @@ class HidGestureListener:
             pid = info.get("product_id", 0)
             up = info.get("usage_page", 0)
             usage = info.get("usage", 0)
+            if (
+                pid in opened_long_hidpp_pids
+                and not (int(up or 0) in (0xFF00, 0xFF43) and int(usage or 0) in (0x0002, 0x0202))
+            ):
+                continue
             product = info.get("product_string")
             source = info.get("source", "unknown")
             # Snapshot before inner branches rebind `info` to HID++ responses.
@@ -3145,11 +3182,18 @@ class HidGestureListener:
             if self._dev is None:
                 continue
 
+            if opened_up in (0xFF00, 0xFF43) and opened_usage in (0x0002, 0x0202):
+                opened_long_hidpp_pids.add(pid)
+
             # Narrow the device-index search based on transport:
             #  - BT candidates only use BT_DEV_IDX (0xFF)
-            #  - Bolt receivers only use slots 1-6
+            #  - Bolt / USB receivers only use slots 1-6
             #  - Unknown: try all (BT first, then receiver slots)
             bt_opened = "bluetooth" in (opened_transport or "").lower()
+            is_receiver = (
+                pid == BOLT_RECEIVER_PID
+                or "receiver" in (product or "").lower()
+            )
             # A sleeping device takes up to ~850 ms to answer its first
             # request. Only a receiver can afford to wait that long: it
             # rejects an empty slot within ~10 ms, while elsewhere nothing
@@ -3160,6 +3204,8 @@ class HidGestureListener:
             elif pid == BOLT_RECEIVER_PID:
                 default_idx_order = (1, 2, 3, 4, 5, 6)
                 probe_ms = 1500
+            elif is_receiver:
+                default_idx_order = (1, 2, 3, 4, 5, 6)
             else:
                 default_idx_order = (BT_DEV_IDX, 1, 2, 3, 4, 5, 6)
             cached_dev_idx = None
@@ -3181,6 +3227,10 @@ class HidGestureListener:
             reprog_found = False
             hidpp_name = None
             for idx in idx_order:
+                if idx != cached_dev_idx and (
+                    self._wake_requested or self._reconnect_requested
+                ):
+                    break
                 self._dev_idx = idx
                 fi = self._find_feature(FEAT_REPROG_V4, timeout_ms=probe_ms)
                 if fi is not None:
@@ -3404,6 +3454,18 @@ class HidGestureListener:
                             )
                         except Exception as exc:
                             print(f"[HidGesture] Cache write skipped: {exc}")
+                        if self._dpi_idx is not None and self._desired_dpi is not None:
+                            try:
+                                dpi = clamp_dpi(self._desired_dpi, self._connected_device_info)
+                                hi = (dpi >> 8) & 0xFF
+                                lo = dpi & 0xFF
+                                dpi_resp = self._request(
+                                    self._dpi_idx, 3, [0x00, hi, lo], timeout_ms=300
+                                )
+                                if dpi_resp:
+                                    print(f"[HidGesture] Initial DPI set to {dpi} on connect")
+                            except Exception as exc:
+                                print(f"[HidGesture] Initial DPI set on connect skipped: {exc}")
                         self._reprog_absent_until.pop(cand_key, None)
                         return True
                     continue     # divert failed -- try next receiver slot
@@ -3429,22 +3491,17 @@ class HidGestureListener:
 
     def _interruptible_sleep(self, seconds):
         """Sleep up to ``seconds`` in 0.1 s slices, returning early if the
-        listener has been stopped so teardown stays responsive."""
+        listener has been stopped or woken by user/device activity."""
         for _ in range(int(max(0.0, seconds) / 0.1)):
-            if not self._running:
+            if not self._running or self._reconnect_requested or self._wake_requested:
                 return
             time.sleep(0.1)
 
     def _main_loop(self):
         """Outer loop: connect → listen → reconnect on error/disconnect."""
         retry_logged = False
-        # Backoff for repeated failed connects. A sleeping or unreachable BLE
-        # mouse can stay enumerable while every open+probe fails; a flat 1.5 s
-        # retry then re-enumerates constantly, which on macOS also multiplies
-        # the per-attempt IOKit work (issue #238). Grow 1.5 s to 30 s on
-        # consecutive failures; reset on any successful connect.
-        _CONNECT_BACKOFF_BASE_S = 1.5
-        _CONNECT_BACKOFF_MAX_S = 30.0
+        _CONNECT_BACKOFF_BASE_S = 1.0
+        _CONNECT_BACKOFF_MAX_S = 3.0
         connect_backoff_s = _CONNECT_BACKOFF_BASE_S
         while self._running:
             if not self._try_connect():
@@ -3455,12 +3512,19 @@ class HidGestureListener:
                     )
                     retry_logged = True
                 self._interruptible_sleep(connect_backoff_s)
-                connect_backoff_s = min(
-                    connect_backoff_s * 2, _CONNECT_BACKOFF_MAX_S
-                )
+                if self._wake_requested or self._reconnect_requested:
+                    self._wake_requested = False
+                    self._reconnect_requested = False
+                    connect_backoff_s = _CONNECT_BACKOFF_BASE_S
+                else:
+                    connect_backoff_s = min(
+                        connect_backoff_s * 2, _CONNECT_BACKOFF_MAX_S
+                    )
                 continue
             retry_logged = False
             connect_backoff_s = _CONNECT_BACKOFF_BASE_S
+            self._reconnect_requested = False
+            self._wake_requested = False
 
             self._connected = True
             if self._on_connect:
@@ -3481,7 +3545,13 @@ class HidGestureListener:
                 while self._running:
                     if self._reconnect_requested:
                         self._reconnect_requested = False
-                        raise IOError("reconnect requested")
+                        _device_asleep = False
+                        self._device_asleep = False
+                        _device_sleep_time = None
+                        _no_data_count = 0
+                        self._consecutive_request_timeouts = 0
+                        self._last_reset_check_time = 0.0
+                        self._check_and_restore_settings_if_reset()
 
                     if self._consecutive_request_timeouts >= _CONSECUTIVE_TIMEOUT_RECONNECT:
                         if not _device_asleep:
@@ -3621,4 +3691,4 @@ class HidGestureListener:
                         pass
 
             if self._running:
-                self._interruptible_sleep(2)
+                self._interruptible_sleep(0.2)

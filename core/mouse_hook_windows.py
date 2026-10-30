@@ -773,13 +773,13 @@ class MouseHook(BaseMouseHook):
         return True
 
     def _resume_recovery_worker(self):
-        delay = getattr(self, "_RESUME_RECONNECT_DELAY_S", 1.0)
+        delay = getattr(self, "_RESUME_RECONNECT_DELAY_S", 0.2)
         time.sleep(delay)
         if not self._running:
             return
         self._on_device_change()
         followup_delay = getattr(
-            self, "_RESUME_FOLLOWUP_DELAY_S", 2.0 if delay > 0 else 0.0
+            self, "_RESUME_FOLLOWUP_DELAY_S", 1.0 if delay > 0 else 0.0
         )
         if followup_delay > 0:
             time.sleep(followup_delay)

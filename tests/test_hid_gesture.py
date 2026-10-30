@@ -1652,6 +1652,122 @@ class TestHidDpiRecoveryAndReconnect(unittest.TestCase):
         listener.notify_user_activity()
         self.assertTrue(listener._wake_requested)
 
+    def test_dpi_supported_property_reflects_dpi_idx(self):
+        listener = hid_gesture.HidGestureListener()
+        self.assertFalse(listener.dpi_supported)
+        listener._dpi_idx = 0x0C
+        self.assertTrue(listener.dpi_supported)
+
+    def test_interruptible_sleep_returns_early_on_wake_request(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._running = True
+        listener._wake_requested = True
+        start = time.monotonic()
+        listener._interruptible_sleep(10)
+        self.assertLess(time.monotonic() - start, 0.5)
+
+    def test_try_connect_applies_desired_dpi_immediately_on_connect(self):
+        listener = hid_gesture.HidGestureListener()
+        listener.set_desired_dpi(2000)
+        info = {
+            "product_id": 0xC52B,
+            "usage_page": 0xFF00,
+            "usage": 0x0002,
+            "source": "hidapi-enumerate",
+            "product_string": "USB Receiver",
+            "path": b"/dev/hidraw-test",
+        }
+        fake_dev = _FakeHidDevice()
+
+        def fake_find_feature(feature_id, *, timeout_ms=None):
+            if feature_id == hid_gesture.FEAT_REPROG_V4:
+                return 0x09
+            if feature_id == hid_gesture.FEAT_ADJ_DPI:
+                return 0x0C
+            return None
+
+        listener._request = Mock(return_value=(0x01, 0x0C, 3, 0x0A, [0x00, 0x07, 0xD0]))
+
+        with (
+            patch.object(listener, "_vendor_hid_infos", return_value=[info]),
+            patch.object(listener, "_find_feature", side_effect=fake_find_feature),
+            patch.object(listener, "_query_device_name", return_value="MX Master 3 for Mac"),
+            patch.object(listener, "_discover_reprog_controls", return_value=[]),
+            patch.object(listener, "_divert", return_value=True),
+            patch.object(listener, "_divert_extras"),
+            patch.object(hid_gesture, "HIDAPI_OK", True),
+            patch.object(hid_gesture, "_BACKEND_PREFERENCE", "hidapi"),
+            patch.object(hid_gesture, "_HID_API_STYLE", "hidapi"),
+            patch.object(
+                hid_gesture,
+                "_hid",
+                SimpleNamespace(device=lambda: fake_dev),
+                create=True,
+            ),
+            patch("builtins.print"),
+        ):
+            self.assertTrue(listener._try_connect())
+
+        listener._request.assert_any_call(0x0C, 3, [0x00, 0x07, 0xD0], timeout_ms=300)
+
+    def test_try_connect_skips_sibling_non_long_collections_after_long_opened(self):
+        listener = hid_gesture.HidGestureListener()
+        infos = [
+            {
+                "product_id": 0xC52B,
+                "usage_page": 0xFF00,
+                "usage": 0x0002,
+                "source": "hidapi-enumerate",
+                "product_string": "USB Receiver",
+                "path": b"/dev/col02",
+            },
+            {
+                "product_id": 0xC52B,
+                "usage_page": 0xFFBC,
+                "usage": 0x0088,
+                "source": "hidapi-enumerate",
+                "product_string": "USB Receiver",
+                "path": b"/dev/col04",
+            },
+            {
+                "product_id": 0xC52B,
+                "usage_page": 0xFF00,
+                "usage": 0x0001,
+                "source": "hidapi-enumerate",
+                "product_string": "USB Receiver",
+                "path": b"/dev/col01",
+            },
+            {
+                "product_id": 0xC52B,
+                "usage_page": 0xFF00,
+                "usage": 0x0004,
+                "source": "hidapi-enumerate",
+                "product_string": "USB Receiver",
+                "path": b"/dev/col03",
+            },
+        ]
+        fake_dev = _FakeHidDevice()
+
+        with (
+            patch.object(listener, "_vendor_hid_infos", return_value=infos),
+            patch.object(listener, "_find_feature", return_value=None),
+            patch.object(hid_gesture, "HIDAPI_OK", True),
+            patch.object(hid_gesture, "_BACKEND_PREFERENCE", "hidapi"),
+            patch.object(hid_gesture, "_HID_API_STYLE", "hidapi"),
+            patch.object(
+                hid_gesture,
+                "_hid",
+                SimpleNamespace(device=lambda: fake_dev),
+                create=True,
+            ),
+            patch("core.hid_gesture._load_last_device_cache", return_value=None),
+            patch("builtins.print"),
+        ):
+            self.assertFalse(listener._try_connect())
+
+        # Only the primary long HID++ collection (col02) should be opened and probed
+        fake_dev.open_path.assert_called_once_with(b"/dev/col02")
+
 
 if __name__ == "__main__":
     unittest.main()

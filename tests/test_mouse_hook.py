@@ -1832,6 +1832,28 @@ class WindowsMouseHookWakeTests(unittest.TestCase):
         hook._notify_hid_activity()
         mock_hg.notify_user_activity.assert_called_once()
 
+    def test_notify_hid_activity_wakes_disconnected_listener_with_throttle(self):
+        from core.mouse_hook_base import BaseMouseHook
+
+        hook = BaseMouseHook()
+        mock_hg = Mock()
+        mock_hg._device_asleep = False
+        mock_hg._connected = False
+        hook._hid_gesture = mock_hg
+
+        hook._notify_hid_activity()
+        mock_hg.notify_user_activity.assert_called_once()
+
+        # Immediate second move within 0.5s is throttled
+        mock_hg.notify_user_activity.reset_mock()
+        hook._notify_hid_activity()
+        mock_hg.notify_user_activity.assert_not_called()
+
+        # Move after 0.6s wakes disconnected listener even without 3s idle
+        hook._last_disconnected_wake_time -= 0.6
+        hook._notify_hid_activity()
+        mock_hg.notify_user_activity.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

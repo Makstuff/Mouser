@@ -59,6 +59,8 @@ class BaseMouseHook:
         self.wheel_native_invert_active = False
         self._gesture_direction_enabled = False
         self._last_activity_notify_time = 0.0
+        self._last_disconnected_wake_time = 0.0
+        self._desired_dpi = None
         self._on_taskbar_created = None
         self._gesture_os_passthrough = False
         self._gesture_move_callback = None
@@ -346,8 +348,19 @@ class BaseMouseHook:
         now = time.monotonic()
         idle_duration = now - getattr(self, "_last_mouse_activity_time", 0.0)
         self._last_mouse_activity_time = now
-        # If the mouse was idle for >= 3 seconds or device was flagged asleep, wake & verify settings
-        if idle_duration >= 3.0 or getattr(hg, "_device_asleep", False):
+        is_connected = bool(getattr(hg, "_connected", True))
+        # If the mouse was idle for >= 3 seconds, device was flagged asleep,
+        # or listener is still disconnected and waiting to connect, wake immediately.
+        if (
+            idle_duration >= 3.0
+            or getattr(hg, "_device_asleep", False)
+            or (
+                not is_connected
+                and now - getattr(self, "_last_disconnected_wake_time", 0.0) >= 0.5
+            )
+        ):
+            if not is_connected:
+                self._last_disconnected_wake_time = now
             if hasattr(hg, "notify_user_activity"):
                 hg.notify_user_activity()
 
@@ -502,6 +515,8 @@ class BaseMouseHook:
             on_battery=self._on_hid_battery,
         )
         self._hid_gesture = listener
+        if getattr(self, "_desired_dpi", None) is not None and hasattr(listener, "set_desired_dpi"):
+            listener.set_desired_dpi(self._desired_dpi)
         if not listener.start():
             self._hid_gesture = None
         elif hasattr(listener, "set_thumb_rawxy_enabled"):
@@ -510,6 +525,7 @@ class BaseMouseHook:
         return self._hid_gesture
 
     def set_dpi(self, dpi_value):
+        self._desired_dpi = dpi_value
         if self._hid_gesture:
             if hasattr(self._hid_gesture, "set_desired_dpi"):
                 self._hid_gesture.set_desired_dpi(dpi_value)
